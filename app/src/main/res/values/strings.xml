@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">BrainRotGuard</string>
+    <string name="setup_title">BrainRotGuard setup</string>
+    <string name="setup_hint">http://192.168.1.50:8080</string>
+    <string name="setup_save">Save &amp; connect</string>
+    <string name="setup_invalid">Enter a valid server URL (e.g. http://192.168.1.50:8080)</string>
+    <string name="offline_message">Can\'t reach the BrainRotGuard server at\n%1$s\n\nCheck that the server is running, then retry.</string>
+    <string name="offline_retry">Retry</string>
+</resources>
