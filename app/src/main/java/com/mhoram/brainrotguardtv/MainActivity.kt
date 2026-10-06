@@ -68,7 +68,7 @@ class MainActivity : Activity() {
         val input = EditText(this).apply {
             hint = getString(R.string.setup_hint)
             setText(prefill)
-            singleLine = true
+            setSingleLine(true)
             setTextColor(Color.WHITE)
         }
         val save = Button(this).apply {
