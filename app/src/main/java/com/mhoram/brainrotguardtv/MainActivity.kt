@@ -32,6 +32,7 @@ class MainActivity : Activity() {
     private lateinit var prefs: SharedPreferences
     private lateinit var root: FrameLayout
     private var webView: WebView? = null
+    private var backPressedStart = 0L
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -155,8 +156,13 @@ class MainActivity : Activity() {
             text = getString(R.string.offline_retry)
             setOnClickListener { showWebView(url) }
         }
+        val changeServer = Button(this).apply {
+            text = getString(R.string.offline_change_server)
+            setOnClickListener { showSetup(prefill = serverUrl() ?: "") }
+        }
         box.addView(msg)
         box.addView(retry)
+        box.addView(changeServer)
         retry.requestFocus()
         root.addView(box)
         webView?.destroy()
@@ -175,9 +181,26 @@ class MainActivity : Activity() {
     }
 
     override fun onBackPressed() {
-        // Stay in the kiosk: go back within the web app, otherwise do nothing
+        // Stay in the kiosk: go back within the web app, otherwise do nothing.
+        // (Long-press BACK never reaches here — dispatchKeyEvent consumes it.)
         val wv = webView
         if (wv != null && wv.canGoBack()) wv.goBack()
+    }
+
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        // Long-press BACK (>= 1s) is the universal escape hatch back to setup,
+        // for remotes that have no MENU button. Consumed here so onBackPressed
+        // (in-app back) doesn't fire on release.
+        if (event.keyCode == KeyEvent.KEYCODE_BACK && event.action == KeyEvent.ACTION_DOWN) {
+            if (event.repeatCount == 0) backPressedStart = System.currentTimeMillis()
+            else if (backPressedStart > 0 &&
+                (System.currentTimeMillis() - backPressedStart) > LONG_PRESS_BACK_MS) {
+                backPressedStart = 0
+                showSetup(prefill = serverUrl() ?: "")
+                return true
+            }
+        }
+        return super.dispatchKeyEvent(event)
     }
 
     // ------------------------------------------------------------- immersive
@@ -215,5 +238,6 @@ class MainActivity : Activity() {
 
     companion object {
         private const val KEY_URL = "server_url"
+        private const val LONG_PRESS_BACK_MS = 1000L
     }
 }
