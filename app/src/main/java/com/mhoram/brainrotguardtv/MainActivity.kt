@@ -62,7 +62,7 @@ class MainActivity : Activity() {
     private var cursorX = 0f
     private var cursorY = 0f
     private val cursorSizePx by lazy {
-        (20 * resources.displayMetrics.density).toInt()
+        (30 * resources.displayMetrics.density).toInt()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -425,18 +425,53 @@ class MainActivity : Activity() {
     }
 
     private fun moveCursor(keyCode: Int, repeatCount: Int) {
-        // Accelerate while the direction is held: base step grows with repeats.
-        val step = cursorSizePx * 1.5f * (1f + (repeatCount.coerceAtMost(24) / 6f))
+        // Small base steps with gentle acceleration while the direction is held.
+        val step = 8f * resources.displayMetrics.density *
+            (1f + (repeatCount.coerceAtMost(24) / 12f))
+        var dx = 0f
+        var dy = 0f
         when (keyCode) {
-            KeyEvent.KEYCODE_DPAD_UP -> cursorY -= step
-            KeyEvent.KEYCODE_DPAD_DOWN -> cursorY += step
-            KeyEvent.KEYCODE_DPAD_LEFT -> cursorX -= step
-            KeyEvent.KEYCODE_DPAD_RIGHT -> cursorX += step
+            KeyEvent.KEYCODE_DPAD_UP -> dy = -step
+            KeyEvent.KEYCODE_DPAD_DOWN -> dy = step
+            KeyEvent.KEYCODE_DPAD_LEFT -> dx = -step
+            KeyEvent.KEYCODE_DPAD_RIGHT -> dx = step
         }
-        cursorX = cursorX.coerceIn(0f, (root.width - cursorSizePx).toFloat())
-        cursorY = cursorY.coerceIn(0f, (root.height - cursorSizePx).toFloat())
+        val rawX = cursorX + dx
+        val rawY = cursorY + dy
+        cursorX = rawX.coerceIn(0f, (root.width - cursorSizePx).toFloat())
+        cursorY = rawY.coerceIn(0f, (root.height - cursorSizePx).toFloat())
+        // Pushing the pointer past the top/bottom edge scrolls the page
+        // (faster than the cursor step — one press ≈ 3 cursor-steps of scroll).
+        if (dy != 0f && rawY != cursorY) scrollPage(dy * 3f)
         updateCursor()
         dispatchHover()
+    }
+
+    /** Scrolls the page under the pointer, like a mouse-wheel tick. */
+    private fun scrollPage(amountPx: Float) {
+        val wv = webView ?: return
+        val now = SystemClock.uptimeMillis()
+        val props = MotionEvent.PointerProperties().apply {
+            id = 0
+            toolType = MotionEvent.TOOL_TYPE_MOUSE
+        }
+        val (x, y) = cursorPoint()
+        val coords = MotionEvent.PointerCoords().apply {
+            this.x = x
+            this.y = y
+            // Positive AXIS_VSCROLL = wheel up; moving the cursor down (dy>0)
+            // should scroll the content down, hence the negation. One unit
+            // scrolls roughly 64px.
+            setAxisValue(MotionEvent.AXIS_VSCROLL, -amountPx / 64f)
+        }
+        wv.dispatchGenericMotionEvent(
+            MotionEvent.obtain(
+                now, now, MotionEvent.ACTION_SCROLL, 1,
+                arrayOf(props), arrayOf(coords),
+                0, 0, 0f, 0f, 0, 0,
+                android.view.InputDevice.SOURCE_MOUSE, 0
+            )
+        )
     }
 
     private fun updateCursor() {
@@ -457,7 +492,7 @@ class MainActivity : Activity() {
         val (x, y) = cursorPoint()
         val now = SystemClock.uptimeMillis()
         wv.dispatchGenericMotionEvent(
-            MotionEvent.obtain(now, now, MotionEvent.ACTION_HOVER_MOVE, x, y, 0)
+            mouseEvent(now, now, MotionEvent.ACTION_HOVER_MOVE, x, y, buttonState = 0)
         )
     }
 
@@ -465,18 +500,49 @@ class MainActivity : Activity() {
         val wv = webView ?: return
         val (x, y) = cursorPoint()
         val now = SystemClock.uptimeMillis()
+        // This Chromium build only turns touch-stream taps (finger semantics)
+        // into clicks — mouse tool-type events are dropped, and generic-stream
+        // ACTION_BUTTON_PRESS is ignored too. So click as a finger; the
+        // mouse-channel hover/scroll events elsewhere still drive hover styles
+        // and embedded-player controls.
         wv.dispatchTouchEvent(MotionEvent.obtain(now, now, MotionEvent.ACTION_DOWN, x, y, 0))
         wv.dispatchTouchEvent(MotionEvent.obtain(now, now + 60, MotionEvent.ACTION_UP, x, y, 0))
+    }
+
+    /** Builds a full pointer event so Chromium treats it as a real mouse. */
+    private fun mouseEvent(
+        downTime: Long,
+        eventTime: Long,
+        action: Int,
+        x: Float,
+        y: Float,
+        buttonState: Int
+    ): MotionEvent {
+        val props = MotionEvent.PointerProperties().apply {
+            id = 0
+            toolType = MotionEvent.TOOL_TYPE_MOUSE
+        }
+        val coords = MotionEvent.PointerCoords().apply {
+            this.x = x
+            this.y = y
+            pressure = 1f
+        }
+        return MotionEvent.obtain(
+            downTime, eventTime, action, 1,
+            arrayOf(props), arrayOf(coords),
+            0, buttonState, 1f, 1f, 0, 0,
+            android.view.InputDevice.SOURCE_MOUSE, 0
+        )
     }
 
     /** Small circular cursor: white dot with a dark ring, visible on any background. */
     private inner class PointerView(context: Context) : View(context) {
         private val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.WHITE
+            color = 0xFF2196F3.toInt()  // material blue
             style = Paint.Style.FILL
         }
         private val ring = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.DKGRAY
+            color = Color.WHITE
             style = Paint.Style.STROKE
             strokeWidth = 2.5f * resources.displayMetrics.density
         }
