@@ -8,4 +8,9 @@
     <string name="offline_message">Can\'t reach the BrainRotGuard server at\n%1$s\n\nCheck that the server is running, then retry.</string>
     <string name="offline_retry">Retry</string>
     <string name="offline_change_server">Change server</string>
+    <string name="back_hint">Hold BACK to change server</string>
+    <string name="voice_listening">🎤 Starting mic…</string>
+    <string name="voice_speak_now">🎤 Speak now (BACK to cancel)</string>
+    <string name="voice_error">Didn’t catch that — try again</string>
+    <string name="voice_unavailable">Voice search is not available on this device</string>
 </resources>

@@ -3,6 +3,10 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+
+    <!-- Mic comes from the remote on TV; not all devices have one -->
+    <uses-feature android:name="android.hardware.microphone" android:required="false" />
 
     <!-- TV features: leanback launcher makes it appear on the Android TV home screen -->
     <uses-feature android:name="android.software.leanback" android:required="false" />
@@ -10,8 +14,8 @@
 
     <application
         android:label="@string/app_name"
-        android:icon="@drawable/ic_launcher"
-        android:banner="@drawable/ic_banner"
+        android:icon="@drawable/brg_launcher"
+        android:banner="@drawable/brg_banner"
         android:usesCleartextTraffic="true"
         android:hardwareAccelerated="true"
         android:theme="@style/KioskTheme"

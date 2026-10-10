@@ -1,19 +1,30 @@
 package com.mhoram.brainrotguardtv
 
+import android.Manifest
 import android.app.Activity
+import android.content.ComponentName
 import android.content.Context
+import android.content.Intent
 import android.content.SharedPreferences
+import android.content.pm.PackageManager
+import android.net.Uri
+import android.speech.RecognitionListener
+import android.speech.RecognizerIntent
+import android.speech.SpeechRecognizer
 import android.graphics.Color
 import android.os.Bundle
 import android.view.KeyEvent
 import android.view.View
 import android.view.WindowManager
+import android.view.inputmethod.InputMethodManager
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
+import android.webkit.JavascriptInterface
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.Button
+import android.widget.Toast
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.LinearLayout
@@ -32,7 +43,10 @@ class MainActivity : Activity() {
     private lateinit var prefs: SharedPreferences
     private lateinit var root: FrameLayout
     private var webView: WebView? = null
-    private var backPressedStart = 0L
+    private var backLongPressFired = false
+    private var voiceActive = false
+    private var voiceReady = false
+    private var voiceCooldownUntil = 0L
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -70,7 +84,15 @@ class MainActivity : Activity() {
             hint = getString(R.string.setup_hint)
             setText(prefill)
             setSingleLine(true)
-            setTextColor(Color.WHITE)
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or
+                android.text.InputType.TYPE_TEXT_VARIATION_URI
+            // Explicit light field + dark text: default TV theme styling can render
+            // the field light, making white text unreadable.
+            setTextColor(Color.BLACK)
+            setHintTextColor(Color.DKGRAY)
+            setBackgroundColor(Color.WHITE)
+            val fieldPad = (12 * resources.displayMetrics.density).toInt()
+            setPadding(fieldPad, fieldPad, fieldPad, fieldPad)
         }
         val save = Button(this).apply {
             text = getString(R.string.setup_save)
@@ -121,11 +143,30 @@ class MainActivity : Activity() {
             allowContentAccess = false
         }
         wv.setBackgroundColor(Color.BLACK)
+        wv.addJavascriptInterface(VoiceSearchBridge(), "BRGVoice")
 
         wv.webViewClient = object : WebViewClient() {
             override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
                 // Keep everything (including YouTube embeds) inside the kiosk.
                 return false
+            }
+
+            override fun onPageFinished(view: WebView, url: String) {
+                // Hook the search box: focusing it opens the voice dialog.
+                // Guarded per page load; the bridge is one-way (opens a dialog
+                // only) so exposure to iframes is a mild annoyance at worst.
+                view.evaluateJavascript(
+                    """
+                    (function() {
+                        if (window.__brgVoiceHookInstalled) return;
+                        window.__brgVoiceHookInstalled = true;
+                        document.querySelectorAll('form[action="/search"] input[name="q"]').forEach(function(el) {
+                            el.addEventListener('focus', function() { BRGVoice.onSearchFocused(); });
+                        });
+                    })();
+                    """.trimIndent(),
+                    null
+                )
             }
 
             override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: WebResourceError?) {
@@ -172,35 +213,209 @@ class MainActivity : Activity() {
     // ----------------------------------------------------------------- input
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
+        // Remote mic / search button: voice-search YouTube through the web app
+        if (keyCode == KeyEvent.KEYCODE_SEARCH ||
+            keyCode == KeyEvent.KEYCODE_ASSIST ||
+            keyCode == KeyEvent.KEYCODE_VOICE_ASSIST) {
+            startVoiceSearch()
+            return true
+        }
         // MENU (D-pad / remote menu button) reopens the server URL editor
         if (keyCode == KeyEvent.KEYCODE_MENU) {
             showSetup(prefill = serverUrl() ?: "")
             return true
         }
+        // Arm long-press tracking for BACK. Many TV remotes never emit key-repeat
+        // events, so timing repeats is unreliable — the framework's own long-press
+        // timer (onKeyLongPress) is not.
+        if (keyCode == KeyEvent.KEYCODE_BACK && event?.repeatCount == 0) {
+            event.startTracking()
+            return true
+        }
         return super.onKeyDown(keyCode, event)
     }
 
-    override fun onBackPressed() {
-        // Stay in the kiosk: go back within the web app, otherwise do nothing.
-        // (Long-press BACK never reaches here — dispatchKeyEvent consumes it.)
-        val wv = webView
-        if (wv != null && wv.canGoBack()) wv.goBack()
+    override fun onKeyLongPress(keyCode: Int, event: KeyEvent?): Boolean {
+        // Universal escape hatch back to setup, for remotes with no MENU button.
+        if (keyCode == KeyEvent.KEYCODE_BACK) {
+            backLongPressFired = true
+            showSetup(prefill = serverUrl() ?: "")
+            return true
+        }
+        return super.onKeyLongPress(keyCode, event)
     }
 
-    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
-        // Long-press BACK (>= 1s) is the universal escape hatch back to setup,
-        // for remotes that have no MENU button. Consumed here so onBackPressed
-        // (in-app back) doesn't fire on release.
-        if (event.keyCode == KeyEvent.KEYCODE_BACK && event.action == KeyEvent.ACTION_DOWN) {
-            if (event.repeatCount == 0) backPressedStart = System.currentTimeMillis()
-            else if (backPressedStart > 0 &&
-                (System.currentTimeMillis() - backPressedStart) > LONG_PRESS_BACK_MS) {
-                backPressedStart = 0
-                showSetup(prefill = serverUrl() ?: "")
+    override fun onKeyUp(keyCode: Int, event: KeyEvent?): Boolean {
+        if (keyCode == KeyEvent.KEYCODE_BACK) {
+            if (backLongPressFired) {
+                backLongPressFired = false
                 return true
             }
+            // BACK while listening cancels voice search, not page history.
+            if (voiceActive) {
+                speechRecognizer?.cancel()
+                endVoiceSession()
+                return true
+            }
+            // Stay in the kiosk: short-press BACK goes back within the web app.
+            val wv = webView
+            if (wv != null && wv.canGoBack()) {
+                wv.goBack()
+            } else {
+                Toast.makeText(this, getString(R.string.back_hint), Toast.LENGTH_SHORT).show()
+            }
+            return true
         }
-        return super.dispatchKeyEvent(event)
+        return super.onKeyUp(keyCode, event)
+    }
+
+    // ----------------------------------------------------------------- voice
+
+    /** Called from page JS when the search input gains focus. */
+    inner class VoiceSearchBridge {
+        @JavascriptInterface
+        fun onSearchFocused() {
+            runOnUiThread {
+                if (voiceActive || System.currentTimeMillis() < voiceCooldownUntil) return@runOnUiThread
+                startVoiceSearch()
+            }
+        }
+    }
+
+    private var speechRecognizer: SpeechRecognizer? = null
+    private var voiceOverlay: TextView? = null
+
+    private fun startVoiceSearch() {
+        if (!SpeechRecognizer.isRecognitionAvailable(this)) {
+            Toast.makeText(this, getString(R.string.voice_unavailable), Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), REQ_RECORD_AUDIO)
+            return
+        }
+        startListening()
+    }
+
+    private fun createRecognizer(): SpeechRecognizer {
+        // Android TV: the default service resolution can silently hang, so prefer
+        // katniss (the ATV voice stack) explicitly when present.
+        val katniss = ComponentName(
+            "com.google.android.katniss",
+            "com.google.android.apps.tvsearch.voice.recognition.KatnissRecognitionService"
+        )
+        return try {
+            packageManager.getServiceInfo(katniss, 0)
+            SpeechRecognizer.createSpeechRecognizer(this, katniss)
+        } catch (e: PackageManager.NameNotFoundException) {
+            SpeechRecognizer.createSpeechRecognizer(this)
+        }
+    }
+
+    private fun startListening() {
+        voiceActive = true
+        voiceReady = false
+        // The input focus that triggered us also pops the on-screen keyboard —
+        // hide it while listening.
+        (getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager)
+            .hideSoftInputFromWindow(webView?.windowToken, 0)
+        val pad = (32 * resources.displayMetrics.density).toInt()
+        val overlay = TextView(this).apply {
+            text = getString(R.string.voice_listening)
+            textSize = 20f
+            setTextColor(Color.WHITE)
+            setBackgroundColor(0xCC000000.toInt())
+            setPadding(pad, pad, pad, pad)
+        }
+        root.addView(
+            overlay,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                android.view.Gravity.CENTER
+            )
+        )
+        voiceOverlay = overlay
+
+        val recognizer = createRecognizer()
+        speechRecognizer = recognizer
+        recognizer.setRecognitionListener(object : RecognitionListener {
+            override fun onResults(results: Bundle) {
+                val query = results
+                    .getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                    ?.firstOrNull()
+                endVoiceSession()
+                val base = serverUrl()
+                if (!query.isNullOrBlank() && base != null) {
+                    // The web app's search is a plain GET form — navigate directly.
+                    webView?.loadUrl("$base/search?q=" + Uri.encode(query))
+                }
+            }
+
+            override fun onError(error: Int) {
+                endVoiceSession()
+                // ERROR_CLIENT = our own cancel() — stay silent for that one.
+                if (error != SpeechRecognizer.ERROR_CLIENT) {
+                    Toast.makeText(
+                        this@MainActivity,
+                        getString(R.string.voice_error) + " (code $error)",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+            }
+
+            override fun onReadyForSpeech(params: Bundle?) {
+                voiceReady = true
+                voiceOverlay?.text = getString(R.string.voice_speak_now)
+            }
+            override fun onBeginningOfSpeech() {}
+            override fun onRmsChanged(rmsdB: Float) {}
+            override fun onBufferReceived(buffer: ByteArray?) {}
+            override fun onEndOfSpeech() {}
+            override fun onPartialResults(partialResults: Bundle?) {}
+            override fun onEvent(eventType: Int, params: Bundle?) {}
+        })
+        recognizer.startListening(Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(
+                RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+                RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
+            )
+            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)
+        })
+        // Watchdog: if the service never reports ready, fail cleanly instead of
+        // hanging on the overlay forever.
+        overlay.postDelayed({
+            if (voiceActive && !voiceReady && speechRecognizer === recognizer) {
+                endVoiceSession()
+                Toast.makeText(this, getString(R.string.voice_unavailable), Toast.LENGTH_LONG).show()
+            }
+        }, 6000)
+    }
+
+    private fun endVoiceSession() {
+        voiceActive = false
+        // Swallow the autofocus that fires when the results page loads.
+        voiceCooldownUntil = System.currentTimeMillis() + 4000
+        speechRecognizer?.destroy()
+        speechRecognizer = null
+        voiceOverlay?.let { root.removeView(it) }
+        voiceOverlay = null
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
+    ) {
+        if (requestCode == REQ_RECORD_AUDIO) {
+            if (grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) {
+                startListening()
+            } else {
+                Toast.makeText(this, getString(R.string.voice_unavailable), Toast.LENGTH_SHORT).show()
+            }
+            return
+        }
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
     }
 
     // ------------------------------------------------------------- immersive
@@ -238,6 +453,6 @@ class MainActivity : Activity() {
 
     companion object {
         private const val KEY_URL = "server_url"
-        private const val LONG_PRESS_BACK_MS = 1000L
+        private const val REQ_RECORD_AUDIO = 42
     }
 }
