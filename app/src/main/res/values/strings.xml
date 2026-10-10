@@ -15,4 +15,5 @@
     <string name="voice_unavailable">Voice search is not available on this device</string>
     <string name="pointer_mode_on">Pointer mode ON — D-pad moves · OK clicks · BACK exits</string>
     <string name="pointer_mode_off">Pointer mode OFF</string>
+    <string name="text_input_title">Enter text</string>
 </resources>

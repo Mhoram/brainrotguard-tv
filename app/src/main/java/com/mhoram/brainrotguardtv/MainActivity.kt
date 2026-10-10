@@ -2,6 +2,7 @@ package com.mhoram.brainrotguardtv
 
 import android.Manifest
 import android.app.Activity
+import android.app.AlertDialog
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
@@ -15,10 +16,13 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.os.SystemClock
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
+import android.view.ViewConfiguration
 import android.view.WindowManager
 import android.view.inputmethod.InputMethodManager
 import android.webkit.WebResourceError
@@ -27,6 +31,7 @@ import android.webkit.JavascriptInterface
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import org.json.JSONObject
 import android.widget.Button
 import android.widget.Toast
 import android.widget.EditText
@@ -47,8 +52,6 @@ class MainActivity : Activity() {
     private lateinit var prefs: SharedPreferences
     private lateinit var root: FrameLayout
     private var webView: WebView? = null
-    private var backLongPressFired = false
-    private var centerLongPressFired = false
     private var voiceActive = false
     private var voiceReady = false
     private var voiceCooldownUntil = 0L
@@ -66,10 +69,19 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
         prefs = getSharedPreferences("kiosk", Context.MODE_PRIVATE)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        // Never connect this window to the IME: focused text fields in the
+        // WebView otherwise keep an IME session alive, and on some TVs (TCL)
+        // the IME then swallows OK/ENTER or even converts them into typed
+        // characters. Text entry happens in native dialogs (own windows) so
+        // the on-screen keyboard still works there.
+        window.setFlags(
+            WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM,
+            WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM
+        )
         root = FrameLayout(this)
         setContentView(root)
         val url = serverUrl()
-        if (url == null) showSetup(prefill = "") else showWebView(url)
+        if (url == null) showSetup("") else showWebView(url)
     }
 
     private fun serverUrl(): String? =
@@ -77,58 +89,42 @@ class MainActivity : Activity() {
 
     // ---------------------------------------------------------------- setup
 
+    /**
+     * Server URL editor. A native dialog (own window) so the on-screen
+     * keyboard works even though the activity window blocks the IME.
+     */
     private fun showSetup(prefill: String) {
-        webView?.destroy()
-        webView = null
-        root.removeAllViews()
-        cursor = null  // was detached by removeAllViews; will be re-created if needed
-
-        val pad = (24 * resources.displayMetrics.density).toInt()
-        val box = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(pad, pad, pad, pad)
-            setBackgroundColor(Color.BLACK)
-            gravity = android.view.Gravity.CENTER
-        }
-        val title = TextView(this).apply {
-            text = getString(R.string.setup_title)
-            textSize = 22f
-            setTextColor(Color.WHITE)
-        }
+        exitMouseMode()
         val input = EditText(this).apply {
             hint = getString(R.string.setup_hint)
             setText(prefill)
             setSingleLine(true)
             inputType = android.text.InputType.TYPE_CLASS_TEXT or
                 android.text.InputType.TYPE_TEXT_VARIATION_URI
-            // Explicit light field + dark text: default TV theme styling can render
-            // the field light, making white text unreadable.
             setTextColor(Color.BLACK)
             setHintTextColor(Color.DKGRAY)
             setBackgroundColor(Color.WHITE)
             val fieldPad = (12 * resources.displayMetrics.density).toInt()
             setPadding(fieldPad, fieldPad, fieldPad, fieldPad)
         }
-        val save = Button(this).apply {
-            text = getString(R.string.setup_save)
-            isFocusableInTouchMode = true
-            setOnClickListener {
+        val dialog = AlertDialog.Builder(this)
+            .setTitle(R.string.setup_title)
+            .setView(input)
+            .setPositiveButton(R.string.setup_save) { d, _ ->
                 val url = normalizeUrl(input.text.toString())
                 if (url != null) {
                     prefs.edit().putString(KEY_URL, url).apply()
                     showWebView(url)
                 } else {
-                    input.error = getString(R.string.setup_invalid)
+                    Toast.makeText(this, getString(R.string.setup_invalid), Toast.LENGTH_LONG).show()
+                    showSetup(input.text.toString())
                 }
             }
-        }
-
-        box.addView(title)
-        box.addView(input)
-        box.addView(save)
+            .create()
+        // First run: no way back to an empty screen — Save is mandatory.
+        dialog.setCancelable(serverUrl() != null)
+        dialog.show()
         input.requestFocus()
-        root.addView(box)
-        exitMouseMode()
     }
 
     private fun normalizeUrl(raw: String): String? {
@@ -169,6 +165,7 @@ class MainActivity : Activity() {
             }
 
             override fun onPageFinished(view: WebView, url: String) {
+                installTextInputHook(view)
                 // Inject a mic button next to each search box. Voice search is
                 // explicit (button / remote mic key) — never automatic on focus,
                 // so the search box can still be used for typing.
@@ -188,12 +185,25 @@ class MainActivity : Activity() {
                             btn.textContent = '\uD83C\uDFA4';
                             btn.setAttribute('aria-label', 'Voice search');
                             btn.setAttribute('title', 'Voice search');
-                            btn.style.cssText = 'margin-left:8px;padding:0 10px;cursor:pointer;font-size:1em;line-height:1;';
+                            // Match the app's .btn-primary look via its own theme vars.
+                            btn.style.cssText = [
+                                'padding:0.625rem 0.875rem',
+                                'margin-right:8px',
+                                'font-size:0.975rem',
+                                'line-height:1',
+                                'font-weight:600',
+                                'color:#fff',
+                                'border:none',
+                                'border-radius:var(--radius-btn,8px)',
+                                'background:var(--bg-card-hover,#1e1e45)',
+                                'cursor:pointer',
+                                'flex-shrink:0'
+                            ].join(';');
                             btn.addEventListener('click', function(e) {
                                 e.preventDefault();
                                 BRGVoice.onMicClicked();
                             });
-                            q.insertAdjacentElement('afterend', btn);
+                            q.insertAdjacentElement('beforebegin', btn);
                         });
                     })();
                     """.trimIndent(),
@@ -246,7 +256,79 @@ class MainActivity : Activity() {
 
     // ----------------------------------------------------------------- input
 
-    override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
+    // All key handling happens here, NOT in onKeyDown/onKeyUp/onKeyLongPress:
+    // the WebView sits first in the key-dispatch chain and consumes OK/ENTER/
+    // directional keys for its own focus navigation, so the Activity-level
+    // fallbacks never fire for keys pressed while web content is showing.
+    // Long-press is timed manually (framework onKeyLongPress depends on the
+    // same unreachable fallback path), which also copes with remotes that
+    // never emit key-repeat events.
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private var longPressKeyCode = 0
+    private var longPressRunnable: Runnable? = null
+    private var longPressFired = false
+
+    override fun dispatchKeyEvent(event: KeyEvent?): Boolean {
+        if (event == null) return super.dispatchKeyEvent(event)
+        when (event.action) {
+            KeyEvent.ACTION_DOWN -> {
+                if (event.isLongPress) {
+                    // Key explicitly flagged as long-press (injected events,
+                    // some remotes). If our own timer already fired for this
+                    // key, just consume the rest of the hold.
+                    if (longPressFired && longPressKeyCode == event.keyCode) return true
+                    disarmLongPress()
+                    val action = longPressAction(event.keyCode)
+                    if (action != null) {
+                        longPressKeyCode = event.keyCode
+                        longPressFired = true
+                        action.run()
+                        return true
+                    }
+                } else if (event.repeatCount == 0) {
+                    armLongPress(event.keyCode)
+                }
+                if (handleKeyDown(event.keyCode, event)) return true
+            }
+            KeyEvent.ACTION_UP -> {
+                val wasLongPress = longPressFired && longPressKeyCode == event.keyCode
+                disarmLongPress()
+                if (wasLongPress) return true  // consumed by the long-press action
+                if (handleKeyUp(event.keyCode, event)) return true
+            }
+        }
+        return super.dispatchKeyEvent(event)
+    }
+
+    private fun longPressAction(keyCode: Int): Runnable? = when (keyCode) {
+        // Universal escape hatch back to setup, for remotes with no MENU button.
+        KeyEvent.KEYCODE_BACK -> Runnable { showSetup(prefill = serverUrl() ?: "") }
+        // Holding OK toggles pointer mode (only over the web content).
+        KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER ->
+            if (webView != null && !voiceActive) Runnable { toggleMouseMode() } else null
+        else -> null
+    }
+
+    private fun armLongPress(keyCode: Int) {
+        disarmLongPress()
+        val action = longPressAction(keyCode) ?: return
+        longPressKeyCode = keyCode
+        val runnable = Runnable {
+            longPressFired = true
+            action.run()
+        }
+        longPressRunnable = runnable
+        mainHandler.postDelayed(runnable, ViewConfiguration.getLongPressTimeout().toLong())
+    }
+
+    private fun disarmLongPress() {
+        longPressRunnable?.let { mainHandler.removeCallbacks(it) }
+        longPressRunnable = null
+        longPressFired = false
+        longPressKeyCode = 0
+    }
+
+    private fun handleKeyDown(keyCode: Int, event: KeyEvent): Boolean {
         // Remote mic / search button: voice-search YouTube through the web app
         if (keyCode == KeyEvent.KEYCODE_SEARCH ||
             keyCode == KeyEvent.KEYCODE_ASSIST ||
@@ -259,62 +341,31 @@ class MainActivity : Activity() {
             showSetup(prefill = serverUrl() ?: "")
             return true
         }
-        // Arm long-press tracking for BACK. Many TV remotes never emit key-repeat
-        // events, so timing repeats is unreliable — the framework's own long-press
-        // timer (onKeyLongPress) is not.
-        if (keyCode == KeyEvent.KEYCODE_BACK && event?.repeatCount == 0) {
-            event.startTracking()
-            return true
-        }
         // In pointer mode the D-pad steers the cursor instead of moving web focus.
-        if (isDirectional(keyCode)) {
-            if (mouseMode) {
-                moveCursor(keyCode, event?.repeatCount ?: 0)
-                return true
-            }
-            return super.onKeyDown(keyCode, event)
-        }
-        // OK/ENTER: in pointer mode, click at the cursor. In normal mode, track
-        // long-press (toggles pointer mode) and synthesize the click on key-up.
-        if (isCenterKey(keyCode)) {
-            if (mouseMode) {
-                if (event?.repeatCount == 0) dispatchTap()
-                return true
-            }
-            if (event?.repeatCount == 0 && webView != null) {
-                event.startTracking()
-                return true
-            }
-        }
-        return super.onKeyDown(keyCode, event)
-    }
-
-    override fun onKeyLongPress(keyCode: Int, event: KeyEvent?): Boolean {
-        // Universal escape hatch back to setup, for remotes with no MENU button.
-        if (keyCode == KeyEvent.KEYCODE_BACK) {
-            backLongPressFired = true
-            showSetup(prefill = serverUrl() ?: "")
+        if (mouseMode && isDirectional(keyCode)) {
+            moveCursor(keyCode, event.repeatCount)
             return true
         }
-        // Holding OK toggles pointer mode (only over the web content).
-        if (isCenterKey(keyCode) && webView != null && !voiceActive) {
-            centerLongPressFired = true
-            toggleMouseMode()
+        // OK/ENTER in pointer mode clicks at the cursor. In normal mode fall
+        // through so the WebView clicks the focused element itself.
+        if (mouseMode && isCenterKey(keyCode)) {
+            if (event.repeatCount == 0) dispatchTap()
             return true
         }
-        return super.onKeyLongPress(keyCode, event)
+        return false
     }
 
-    override fun onKeyUp(keyCode: Int, event: KeyEvent?): Boolean {
+    private fun handleKeyUp(keyCode: Int, event: KeyEvent): Boolean {
         if (keyCode == KeyEvent.KEYCODE_BACK) {
-            if (backLongPressFired) {
-                backLongPressFired = false
-                return true
-            }
             // BACK while listening cancels voice search, not page history.
             if (voiceActive) {
                 speechRecognizer?.cancel()
                 endVoiceSession()
+                return true
+            }
+            // BACK in pointer mode leaves pointer mode first.
+            if (mouseMode) {
+                exitMouseMode()
                 return true
             }
             // Stay in the kiosk: short-press BACK goes back within the web app.
@@ -326,24 +377,7 @@ class MainActivity : Activity() {
             }
             return true
         }
-        if (mouseMode && (isDirectional(keyCode) || isCenterKey(keyCode))) return true
-        if (isCenterKey(keyCode)) {
-            if (centerLongPressFired) {
-                centerLongPressFired = false
-                return true
-            }
-            // Normal mode: the DOWN was swallowed to track long-press — re-play
-            // the press so the WebView clicks the currently focused element.
-            val wv = webView
-            if (wv != null && event != null) {
-                val down = KeyEvent(event.downTime, event.eventTime, KeyEvent.ACTION_DOWN, keyCode, 0)
-                val up = KeyEvent(event.downTime, event.eventTime, KeyEvent.ACTION_UP, keyCode, 0)
-                wv.dispatchKeyEvent(down)
-                wv.dispatchKeyEvent(up)
-                return true
-            }
-        }
-        return super.onKeyUp(keyCode, event)
+        return false
     }
 
     // --------------------------------------------------------- pointer mode
@@ -455,9 +489,71 @@ class MainActivity : Activity() {
         }
     }
 
+    // ---------------------------------------------------- text entry hook
+
+    /**
+     * The activity window blocks the IME (FLAG_ALT_FOCUSABLE_IM), so text
+     * fields in the page can't be typed into directly. Instead, clicking or
+     * Enter-activating a text field opens a native editor dialog (own window,
+     * keyboard works) and writes the result back into the field.
+     *
+     * Triggered on click/Enter only — NOT on focus — so D-pad focus
+     * navigation through the page doesn't pop dialogs.
+     */
+    private fun installTextInputHook(view: WebView) {
+        view.evaluateJavascript(
+            """
+            (function() {
+                if (window.__brgTextInputHook) return;
+                window.__brgTextInputHook = true;
+                function isTextInput(el) {
+                    if (!el || el.tagName !== 'INPUT') return false;
+                    var t = (el.type || 'text').toLowerCase();
+                    return t === 'text' || t === 'search' || t === 'url' || t === '';
+                }
+                function openEditor(el) {
+                    if (!el.dataset.brgId) el.dataset.brgId = 'brg' + Math.random().toString(36).slice(2, 8);
+                    var id = el.dataset.brgId, val = el.value || '';
+                    el.blur();
+                    BRGVoice.onTextInput(id, val);
+                }
+                document.addEventListener('click', function(e) {
+                    if (isTextInput(e.target)) openEditor(e.target);
+                });
+                document.addEventListener('keydown', function(e) {
+                    if (e.key !== 'Enter' && e.keyCode !== 13) return;
+                    var el = document.activeElement;
+                    if (isTextInput(el)) { e.preventDefault(); openEditor(el); }
+                });
+            })();
+            """ .trimIndent(),
+            null
+        )
+    }
+
+    private fun showTextInputDialog(id: String, value: String) {
+        if (webView == null || voiceActive) return
+        val input = EditText(this).apply {
+            setText(value)
+            setSingleLine(true)
+            setSelectAllOnFocus(true)
+        }
+        AlertDialog.Builder(this)
+            .setTitle(R.string.text_input_title)
+            .setView(input)
+            .setPositiveButton(android.R.string.ok) { _, _ ->
+                val js = "(function(){var el=document.querySelector('input[data-brg-id=\"$id\"]');" +
+                    "if(!el)return;el.value=" + JSONObject.quote(input.text.toString()) + ";" +
+                    "el.dispatchEvent(new Event('input',{bubbles:true}));})();"
+                webView?.evaluateJavascript(js, null)
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
     // ----------------------------------------------------------------- voice
 
-    /** Called from page JS when the injected mic button is clicked. */
+    /** Bridges injected page JS to native actions (one-way, opens UI only). */
     inner class VoiceSearchBridge {
         @JavascriptInterface
         fun onMicClicked() {
@@ -465,6 +561,11 @@ class MainActivity : Activity() {
                 if (voiceActive || System.currentTimeMillis() < voiceCooldownUntil) return@runOnUiThread
                 startVoiceSearch()
             }
+        }
+
+        @JavascriptInterface
+        fun onTextInput(id: String, value: String) {
+            runOnUiThread { showTextInputDialog(id, value) }
         }
     }
 
