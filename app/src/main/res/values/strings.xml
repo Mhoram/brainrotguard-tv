@@ -13,4 +13,6 @@
     <string name="voice_speak_now">🎤 Speak now (BACK to cancel)</string>
     <string name="voice_error">Didn’t catch that — try again</string>
     <string name="voice_unavailable">Voice search is not available on this device</string>
+    <string name="pointer_mode_on">Pointer mode ON — D-pad moves · OK clicks · BACK exits</string>
+    <string name="pointer_mode_off">Pointer mode OFF</string>
 </resources>

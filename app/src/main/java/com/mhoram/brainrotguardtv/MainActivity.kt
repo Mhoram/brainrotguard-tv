@@ -11,9 +11,13 @@ import android.net.Uri
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
+import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.Paint
 import android.os.Bundle
+import android.os.SystemClock
 import android.view.KeyEvent
+import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
 import android.view.inputmethod.InputMethodManager
@@ -44,9 +48,19 @@ class MainActivity : Activity() {
     private lateinit var root: FrameLayout
     private var webView: WebView? = null
     private var backLongPressFired = false
+    private var centerLongPressFired = false
     private var voiceActive = false
     private var voiceReady = false
     private var voiceCooldownUntil = 0L
+
+    // Pointer mode: a virtual cursor over the WebView, driven by the D-pad.
+    private var mouseMode = false
+    private var cursor: PointerView? = null
+    private var cursorX = 0f
+    private var cursorY = 0f
+    private val cursorSizePx by lazy {
+        (20 * resources.displayMetrics.density).toInt()
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -67,6 +81,7 @@ class MainActivity : Activity() {
         webView?.destroy()
         webView = null
         root.removeAllViews()
+        cursor = null  // was detached by removeAllViews; will be re-created if needed
 
         val pad = (24 * resources.displayMetrics.density).toInt()
         val box = LinearLayout(this).apply {
@@ -113,6 +128,7 @@ class MainActivity : Activity() {
         box.addView(save)
         input.requestFocus()
         root.addView(box)
+        exitMouseMode()
     }
 
     private fun normalizeUrl(raw: String): String? {
@@ -131,6 +147,7 @@ class MainActivity : Activity() {
 
     private fun showWebView(url: String) {
         root.removeAllViews()
+        cursor = null  // was detached by removeAllViews; will be re-created if needed
         val wv = WebView(this)
         wv.settings.apply {
             javaScriptEnabled = true
@@ -152,7 +169,9 @@ class MainActivity : Activity() {
             }
 
             override fun onPageFinished(view: WebView, url: String) {
-                // Hook the search box: focusing it opens the voice dialog.
+                // Inject a mic button next to each search box. Voice search is
+                // explicit (button / remote mic key) — never automatic on focus,
+                // so the search box can still be used for typing.
                 // Guarded per page load; the bridge is one-way (opens a dialog
                 // only) so exposure to iframes is a mild annoyance at worst.
                 view.evaluateJavascript(
@@ -160,8 +179,21 @@ class MainActivity : Activity() {
                     (function() {
                         if (window.__brgVoiceHookInstalled) return;
                         window.__brgVoiceHookInstalled = true;
-                        document.querySelectorAll('form[action="/search"] input[name="q"]').forEach(function(el) {
-                            el.addEventListener('focus', function() { BRGVoice.onSearchFocused(); });
+                        document.querySelectorAll('form[action="/search"]').forEach(function(form) {
+                            var q = form.querySelector('input[name="q"]');
+                            if (!q || form.querySelector('.brg-voice-btn')) return;
+                            var btn = document.createElement('button');
+                            btn.type = 'button';
+                            btn.className = 'brg-voice-btn';
+                            btn.textContent = '\uD83C\uDFA4';
+                            btn.setAttribute('aria-label', 'Voice search');
+                            btn.setAttribute('title', 'Voice search');
+                            btn.style.cssText = 'margin-left:8px;padding:0 10px;cursor:pointer;font-size:1em;line-height:1;';
+                            btn.addEventListener('click', function(e) {
+                                e.preventDefault();
+                                BRGVoice.onMicClicked();
+                            });
+                            q.insertAdjacentElement('afterend', btn);
                         });
                     })();
                     """.trimIndent(),
@@ -206,6 +238,8 @@ class MainActivity : Activity() {
         box.addView(changeServer)
         retry.requestFocus()
         root.addView(box)
+        exitMouseMode()
+        cursor = null  // was detached by removeAllViews above
         webView?.destroy()
         webView = null
     }
@@ -232,6 +266,26 @@ class MainActivity : Activity() {
             event.startTracking()
             return true
         }
+        // In pointer mode the D-pad steers the cursor instead of moving web focus.
+        if (isDirectional(keyCode)) {
+            if (mouseMode) {
+                moveCursor(keyCode, event?.repeatCount ?: 0)
+                return true
+            }
+            return super.onKeyDown(keyCode, event)
+        }
+        // OK/ENTER: in pointer mode, click at the cursor. In normal mode, track
+        // long-press (toggles pointer mode) and synthesize the click on key-up.
+        if (isCenterKey(keyCode)) {
+            if (mouseMode) {
+                if (event?.repeatCount == 0) dispatchTap()
+                return true
+            }
+            if (event?.repeatCount == 0 && webView != null) {
+                event.startTracking()
+                return true
+            }
+        }
         return super.onKeyDown(keyCode, event)
     }
 
@@ -240,6 +294,12 @@ class MainActivity : Activity() {
         if (keyCode == KeyEvent.KEYCODE_BACK) {
             backLongPressFired = true
             showSetup(prefill = serverUrl() ?: "")
+            return true
+        }
+        // Holding OK toggles pointer mode (only over the web content).
+        if (isCenterKey(keyCode) && webView != null && !voiceActive) {
+            centerLongPressFired = true
+            toggleMouseMode()
             return true
         }
         return super.onKeyLongPress(keyCode, event)
@@ -266,15 +326,141 @@ class MainActivity : Activity() {
             }
             return true
         }
+        if (mouseMode && (isDirectional(keyCode) || isCenterKey(keyCode))) return true
+        if (isCenterKey(keyCode)) {
+            if (centerLongPressFired) {
+                centerLongPressFired = false
+                return true
+            }
+            // Normal mode: the DOWN was swallowed to track long-press — re-play
+            // the press so the WebView clicks the currently focused element.
+            val wv = webView
+            if (wv != null && event != null) {
+                val down = KeyEvent(event.downTime, event.eventTime, KeyEvent.ACTION_DOWN, keyCode, 0)
+                val up = KeyEvent(event.downTime, event.eventTime, KeyEvent.ACTION_UP, keyCode, 0)
+                wv.dispatchKeyEvent(down)
+                wv.dispatchKeyEvent(up)
+                return true
+            }
+        }
         return super.onKeyUp(keyCode, event)
+    }
+
+    // --------------------------------------------------------- pointer mode
+
+    private fun isDirectional(keyCode: Int) = keyCode == KeyEvent.KEYCODE_DPAD_UP ||
+        keyCode == KeyEvent.KEYCODE_DPAD_DOWN ||
+        keyCode == KeyEvent.KEYCODE_DPAD_LEFT ||
+        keyCode == KeyEvent.KEYCODE_DPAD_RIGHT
+
+    private fun isCenterKey(keyCode: Int) = keyCode == KeyEvent.KEYCODE_DPAD_CENTER ||
+        keyCode == KeyEvent.KEYCODE_ENTER
+
+    private fun toggleMouseMode() {
+        if (mouseMode) exitMouseMode() else enterMouseMode()
+        Toast.makeText(
+            this,
+            getString(if (mouseMode) R.string.pointer_mode_on else R.string.pointer_mode_off),
+            Toast.LENGTH_SHORT
+        ).show()
+    }
+
+    private fun enterMouseMode() {
+        val wv = webView ?: return
+        if (cursor == null) {
+            val v = PointerView(this)
+            root.addView(
+                v,
+                FrameLayout.LayoutParams(cursorSizePx, cursorSizePx, android.view.Gravity.TOP or android.view.Gravity.START)
+            )
+            cursor = v
+        }
+        // Start centered (root has already been laid out when the WebView shows).
+        if (cursorX == 0f && cursorY == 0f) {
+            cursorX = (wv.width - cursorSizePx) / 2f
+            cursorY = (wv.height - cursorSizePx) / 2f
+        }
+        mouseMode = true
+        cursor?.visibility = View.VISIBLE
+        updateCursor()
+    }
+
+    private fun exitMouseMode() {
+        mouseMode = false
+        cursor?.visibility = View.GONE
+    }
+
+    private fun moveCursor(keyCode: Int, repeatCount: Int) {
+        // Accelerate while the direction is held: base step grows with repeats.
+        val step = cursorSizePx * 1.5f * (1f + (repeatCount.coerceAtMost(24) / 6f))
+        when (keyCode) {
+            KeyEvent.KEYCODE_DPAD_UP -> cursorY -= step
+            KeyEvent.KEYCODE_DPAD_DOWN -> cursorY += step
+            KeyEvent.KEYCODE_DPAD_LEFT -> cursorX -= step
+            KeyEvent.KEYCODE_DPAD_RIGHT -> cursorX += step
+        }
+        cursorX = cursorX.coerceIn(0f, (root.width - cursorSizePx).toFloat())
+        cursorY = cursorY.coerceIn(0f, (root.height - cursorSizePx).toFloat())
+        updateCursor()
+        dispatchHover()
+    }
+
+    private fun updateCursor() {
+        cursor?.let {
+            it.translationX = cursorX
+            it.translationY = cursorY
+        }
+    }
+
+    /** Center of the cursor in WebView coordinates. */
+    private fun cursorPoint(): FloatArray {
+        val half = cursorSizePx / 2f
+        return floatArrayOf(cursorX + half, cursorY + half)
+    }
+
+    private fun dispatchHover() {
+        val wv = webView ?: return
+        val (x, y) = cursorPoint()
+        val now = SystemClock.uptimeMillis()
+        wv.dispatchGenericMotionEvent(
+            MotionEvent.obtain(now, now, MotionEvent.ACTION_HOVER_MOVE, x, y, 0)
+        )
+    }
+
+    private fun dispatchTap() {
+        val wv = webView ?: return
+        val (x, y) = cursorPoint()
+        val now = SystemClock.uptimeMillis()
+        wv.dispatchTouchEvent(MotionEvent.obtain(now, now, MotionEvent.ACTION_DOWN, x, y, 0))
+        wv.dispatchTouchEvent(MotionEvent.obtain(now, now + 60, MotionEvent.ACTION_UP, x, y, 0))
+    }
+
+    /** Small circular cursor: white dot with a dark ring, visible on any background. */
+    private inner class PointerView(context: Context) : View(context) {
+        private val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.WHITE
+            style = Paint.Style.FILL
+        }
+        private val ring = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.DKGRAY
+            style = Paint.Style.STROKE
+            strokeWidth = 2.5f * resources.displayMetrics.density
+        }
+
+        override fun onDraw(canvas: Canvas) {
+            super.onDraw(canvas)
+            val r = width / 2f - ring.strokeWidth
+            canvas.drawCircle(width / 2f, height / 2f, r, fill)
+            canvas.drawCircle(width / 2f, height / 2f, r, ring)
+        }
     }
 
     // ----------------------------------------------------------------- voice
 
-    /** Called from page JS when the search input gains focus. */
+    /** Called from page JS when the injected mic button is clicked. */
     inner class VoiceSearchBridge {
         @JavascriptInterface
-        fun onSearchFocused() {
+        fun onMicClicked() {
             runOnUiThread {
                 if (voiceActive || System.currentTimeMillis() < voiceCooldownUntil) return@runOnUiThread
                 startVoiceSearch()
@@ -284,6 +470,7 @@ class MainActivity : Activity() {
 
     private var speechRecognizer: SpeechRecognizer? = null
     private var voiceOverlay: TextView? = null
+    private var voiceStartRetries = 0
 
     private fun startVoiceSearch() {
         if (!SpeechRecognizer.isRecognitionAvailable(this)) {
@@ -315,6 +502,7 @@ class MainActivity : Activity() {
     private fun startListening() {
         voiceActive = true
         voiceReady = false
+        voiceStartRetries = 0
         // The input focus that triggered us also pops the on-screen keyboard —
         // hide it while listening.
         (getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager)
@@ -375,19 +563,27 @@ class MainActivity : Activity() {
             override fun onPartialResults(partialResults: Bundle?) {}
             override fun onEvent(eventType: Int, params: Bundle?) {}
         })
-        recognizer.startListening(Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+        // Watchdog: if the service never reports ready, fail cleanly instead of
+        // hanging on the overlay forever. The first invocation after boot often
+        // exceeds the timeout (cold GMS/Katniss start) while actually working,
+        // so retry once before declaring the mic unavailable.
+        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(
                 RecognizerIntent.EXTRA_LANGUAGE_MODEL,
                 RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
             )
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)
-        })
-        // Watchdog: if the service never reports ready, fail cleanly instead of
-        // hanging on the overlay forever.
+        }
+        recognizer.startListening(intent)
         overlay.postDelayed({
             if (voiceActive && !voiceReady && speechRecognizer === recognizer) {
-                endVoiceSession()
-                Toast.makeText(this, getString(R.string.voice_unavailable), Toast.LENGTH_LONG).show()
+                if (voiceStartRetries++ < 1) {
+                    recognizer.cancel()
+                    recognizer.startListening(intent)
+                } else {
+                    endVoiceSession()
+                    Toast.makeText(this, getString(R.string.voice_unavailable), Toast.LENGTH_LONG).show()
+                }
             }
         }, 6000)
     }
