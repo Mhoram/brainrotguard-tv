@@ -98,7 +98,7 @@ class MainActivity : Activity() {
             text = getString(R.string.setup_save)
             isFocusableInTouchMode = true
             setOnClickListener {
-                val url = normalizeUrl(input.text.toString())
+                val url = normalizeServerUrl(input.text.toString())
                 if (url != null) {
                     prefs.edit().putString(KEY_URL, url).apply()
                     showWebView(url)
@@ -113,18 +113,6 @@ class MainActivity : Activity() {
         box.addView(save)
         input.requestFocus()
         root.addView(box)
-    }
-
-    private fun normalizeUrl(raw: String): String? {
-        var url = raw.trim()
-        if (url.isEmpty()) return null
-        if (!url.startsWith("http://") && !url.startsWith("https://")) url = "http://$url"
-        return try {
-            require(url.substringAfter("://").isNotEmpty())
-            url.trimEnd('/')
-        } catch (e: Exception) {
-            null
-        }
     }
 
     // --------------------------------------------------------------- webview
