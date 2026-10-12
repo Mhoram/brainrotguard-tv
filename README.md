@@ -30,6 +30,8 @@ The output APK is at `app/build/outputs/apk/debug/app-debug.apk`.
 
 ## Install on your Google TV
 
+See **[docs/install.md](docs/install.md)** for all installation methods (USB stick, ADB, server download, app stores). Quick version with ADB:
+
 Enable Developer options + USB/Network debugging on the TV (Settings → Device Preferences → About → click Build 7×), then:
 
 ```bash
@@ -56,4 +58,4 @@ The kiosk is only one layer. On the TV itself:
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE).

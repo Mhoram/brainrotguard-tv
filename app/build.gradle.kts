@@ -30,6 +30,8 @@ android {
     }
 }
 
-// Intentionally zero external dependencies — the whole app is a WebView shell.
+// Intentionally zero runtime dependencies — the whole app is a WebView shell.
+// (JUnit is test-only, so the APK stays dependency-free.)
 dependencies {
+    testImplementation("junit:junit:4.13.2")
 }
