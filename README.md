@@ -58,4 +58,4 @@ The kiosk is only one layer. On the TV itself:
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE).
