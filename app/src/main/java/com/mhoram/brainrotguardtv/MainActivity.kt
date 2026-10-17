@@ -28,6 +28,7 @@ import android.view.inputmethod.InputMethodManager
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.JavascriptInterface
+import android.webkit.WebChromeClient
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -65,6 +66,15 @@ class MainActivity : Activity() {
         (30 * resources.displayMetrics.density).toInt()
     }
 
+    // HTML5 fullscreen video (server's #fs-toggle → requestFullscreen on the
+    // player). Handled via WebChromeClient custom views. Requires BACK to
+    // exit fullscreen before doing anything else.
+    private var fullscreenView: View? = null
+    private var fullscreenCallback: WebChromeClient.CustomViewCallback? = null
+
+    // Timestamp (uptimeMillis) of the last hover event dispatched to the page.
+    private var lastHoverAt = 0L
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         prefs = getSharedPreferences("kiosk", Context.MODE_PRIVATE)
@@ -95,6 +105,7 @@ class MainActivity : Activity() {
      */
     private fun showSetup(prefill: String) {
         exitMouseMode()
+        exitHtmlFullscreen()
         val input = EditText(this).apply {
             hint = getString(R.string.setup_hint)
             setText(prefill)
@@ -130,6 +141,7 @@ class MainActivity : Activity() {
     // --------------------------------------------------------------- webview
 
     private fun showWebView(url: String) {
+        exitHtmlFullscreen()
         root.removeAllViews()
         cursor = null  // was detached by removeAllViews; will be re-created if needed
         val wv = WebView(this)
@@ -146,6 +158,35 @@ class MainActivity : Activity() {
         wv.setBackgroundColor(Color.BLACK)
         wv.addJavascriptInterface(VoiceSearchBridge(), "BRGVoice")
 
+        // Without a WebChromeClient, HTML5 fullscreen (requestFullscreen) is a
+        // silent no-op in WebView — the server's fullscreen button then falls
+        // back to its CSS hack. Presenting the player as a custom view gives
+        // real fullscreen on the first toggle.
+        wv.webChromeClient = object : WebChromeClient() {
+            override fun onShowCustomView(
+                view: View,
+                callback: WebChromeClient.CustomViewCallback
+            ) {
+                if (fullscreenView != null) {
+                    callback.onCustomViewHidden()
+                    return
+                }
+                fullscreenView = view
+                fullscreenCallback = callback
+                root.addView(
+                    view,
+                    FrameLayout.LayoutParams(
+                        FrameLayout.LayoutParams.MATCH_PARENT,
+                        FrameLayout.LayoutParams.MATCH_PARENT
+                    )
+                )
+                exitMouseMode()
+                hideSystemUi()
+            }
+
+            override fun onHideCustomView() = exitHtmlFullscreen()
+        }
+
         wv.webViewClient = object : WebViewClient() {
             override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
                 // Keep everything (including YouTube embeds) inside the kiosk.
@@ -154,6 +195,9 @@ class MainActivity : Activity() {
 
             override fun onPageFinished(view: WebView, url: String) {
                 installTextInputHook(view)
+                // Watch pages: put the player at the top of the viewport so
+                // its fullscreen button is reachable without D-pad scrolling.
+                view.evaluateJavascript(TvPageScripts.scrollPlayerIntoViewJs(), null)
                 // Inject a mic button next to each search box. Voice search is
                 // explicit (button / remote mic key) — never automatic on focus,
                 // so the search box can still be used for typing.
@@ -294,6 +338,13 @@ class MainActivity : Activity() {
         // Holding OK toggles pointer mode (only over the web content).
         KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER ->
             if (webView != null && !voiceActive) Runnable { toggleMouseMode() } else null
+        // Long-press PLAY/PAUSE (or FAST_FORWARD) toggles video fullscreen.
+        // Short presses fall through so the player keeps pause/seek behavior.
+        KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE,
+        KeyEvent.KEYCODE_MEDIA_PLAY,
+        KeyEvent.KEYCODE_MEDIA_PAUSE,
+        KeyEvent.KEYCODE_MEDIA_FAST_FORWARD ->
+            if (webView != null && !voiceActive) Runnable { toggleVideoFullscreen() } else null
         else -> null
     }
 
@@ -349,6 +400,11 @@ class MainActivity : Activity() {
             if (voiceActive) {
                 speechRecognizer?.cancel()
                 endVoiceSession()
+                return true
+            }
+            // BACK exits HTML5 fullscreen video first.
+            if (fullscreenView != null) {
+                exitHtmlFullscreen()
                 return true
             }
             // BACK in pointer mode leaves pointer mode first.
@@ -430,14 +486,21 @@ class MainActivity : Activity() {
         cursorY = rawY.coerceIn(0f, (root.height - cursorSizePx).toFloat())
         // Pushing the pointer past the top/bottom edge scrolls the page
         // (faster than the cursor step — one press ≈ 3 cursor-steps of scroll).
-        if (dy != 0f && rawY != cursorY) scrollPage(dy * 3f)
+        if (dy != 0f && rawY != cursorY) scrollPage(dy * 3f, smooth = repeatCount == 0)
         updateCursor()
         dispatchHover()
     }
 
     /** Scrolls the page under the pointer, like a mouse-wheel tick. */
-    private fun scrollPage(amountPx: Float) {
+    private fun scrollPage(amountPx: Float, smooth: Boolean) {
         val wv = webView ?: return
+        if (!smooth) {
+            // Held-key repeats scroll instantly: each wheel event starts a
+            // smooth-scroll animation in Chromium, and repeats stacking on
+            // top of one another is exactly what makes D-pad scrolling janky.
+            wv.scrollBy(0, amountPx.toInt())
+            return
+        }
         val now = SystemClock.uptimeMillis()
         val props = MotionEvent.PointerProperties().apply {
             id = 0
@@ -475,10 +538,34 @@ class MainActivity : Activity() {
         return floatArrayOf(cursorX + half, cursorY + half)
     }
 
+    /** Tears down HTML5 fullscreen video, if active. Safe to call always. */
+    private fun exitHtmlFullscreen() {
+        val view = fullscreenView ?: return
+        fullscreenView = null
+        root.removeView(view)
+        fullscreenCallback?.onCustomViewHidden()
+        fullscreenCallback = null
+        hideSystemUi()
+    }
+
+    /** Long-press ▶️ / ⏩ — zoom the video player via the page's own toggle. */
+    private fun toggleVideoFullscreen() {
+        if (webView == null) return
+        if (fullscreenView != null) {
+            exitHtmlFullscreen()
+            return
+        }
+        webView?.evaluateJavascript(TvPageScripts.toggleFullscreenJs(), null)
+    }
+
     private fun dispatchHover() {
         val wv = webView ?: return
         val (x, y) = cursorPoint()
         val now = SystemClock.uptimeMillis()
+        // Hover moves force :hover recomputation and repaints in the page —
+        // throttle so fast cursor movement doesn't choke rendering.
+        if (!TvPageScripts.shouldDispatchHover(lastHoverAt, now)) return
+        lastHoverAt = now
         wv.dispatchGenericMotionEvent(
             mouseEvent(now, now, MotionEvent.ACTION_HOVER_MOVE, x, y, buttonState = 0)
         )
