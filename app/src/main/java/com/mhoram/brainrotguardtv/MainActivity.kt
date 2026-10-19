@@ -195,9 +195,10 @@ class MainActivity : Activity() {
 
             override fun onPageFinished(view: WebView, url: String) {
                 installTextInputHook(view)
-                // Watch pages: put the player at the top of the viewport so
-                // its fullscreen button is reachable without D-pad scrolling.
+                // Watch pages: put the player at the top of the viewport and
+                // pin its fullscreen button where a TV can see and reach it.
                 view.evaluateJavascript(TvPageScripts.scrollPlayerIntoViewJs(), null)
+                view.evaluateJavascript(TvPageScripts.watchPageStyleJs(), null)
                 // Inject a mic button next to each search box. Voice search is
                 // explicit (button / remote mic key) — never automatic on focus,
                 // so the search box can still be used for typing.

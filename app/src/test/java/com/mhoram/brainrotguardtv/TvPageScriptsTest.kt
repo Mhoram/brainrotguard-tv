@@ -66,4 +66,19 @@ class TvPageScriptsTest {
         val js = TvPageScripts.toggleFullscreenJs()
         assertTrue("must guard against a missing button", js.contains("if (b)"))
     }
+
+    @Test
+    fun `watch style forces the fullscreen button visible`() {
+        val js = TvPageScripts.watchPageStyleJs()
+        assertTrue(js.contains(".fs-toggle"))
+        assertTrue(js.contains("opacity: 1"))
+    }
+
+    @Test
+    fun `watch style pins the button to the top-right and enlarges it`() {
+        val js = TvPageScripts.watchPageStyleJs()
+        assertTrue(js.contains("top: 12px"))
+        assertTrue(js.contains("bottom: auto"))
+        assertTrue(js.contains("width: 56px"))
+    }
 }

@@ -31,6 +31,30 @@ internal object TvPageScripts {
     """.trimIndent()
 
     /**
+     * TV overrides for the watch page's fullscreen button. The server's
+     * .fs-toggle is bottom-right of the player and opacity:0 until hovered —
+     * both wrong for a TV: the bottom edge is below the fold on a 16:9 screen,
+     * and nothing ever hovers. Pin it to the top-right (visible once the
+     * player is scrolled top-aligned) and make it always-on and bigger.
+     */
+    internal fun watchPageStyleJs(): String = """
+        (function() {
+            var s = document.createElement('style');
+            s.textContent =
+                '.fs-toggle{' +
+                '  opacity: 1 !important;' +
+                '  top: 12px !important;' +
+                '  bottom: auto !important;' +
+                '  right: 12px !important;' +
+                '  width: 56px !important;' +
+                '  height: 56px !important;' +
+                '  z-index: 12;' +
+                '}';
+            document.head.appendChild(s);
+        })();
+    """.trimIndent()
+
+    /**
      * Clicks the web app's fullscreen toggle button (#fs-toggle), if present.
      * Going through the page's own button keeps its fullscreenchange listeners
      * and fallback-fullscreen logic in the loop.
