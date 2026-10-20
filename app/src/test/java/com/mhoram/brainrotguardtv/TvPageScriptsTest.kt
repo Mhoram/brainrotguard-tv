@@ -38,6 +38,34 @@ class TvPageScriptsTest {
         assertTrue(TvPageScripts.shouldDispatchHover(lastDispatchAtMs = 1000, nowMs = 1100, minIntervalMs = 100))
     }
 
+    // ------------------------------------------------------ double-press
+
+    @Test
+    fun `no previous press is never a double-press`() {
+        assertFalse(TvPageScripts.isDoublePress(lastPressAtMs = 0, nowMs = 100))
+    }
+
+    @Test
+    fun `second press within the window is a double-press`() {
+        assertTrue(TvPageScripts.isDoublePress(lastPressAtMs = 1000, nowMs = 1300))
+    }
+
+    @Test
+    fun `second press at the window edge is a double-press`() {
+        assertTrue(TvPageScripts.isDoublePress(lastPressAtMs = 1000, nowMs = 1400))
+    }
+
+    @Test
+    fun `second press after the window is a new single press`() {
+        assertFalse(TvPageScripts.isDoublePress(lastPressAtMs = 1000, nowMs = 1401))
+    }
+
+    @Test
+    fun `custom window is honored`() {
+        assertFalse(TvPageScripts.isDoublePress(lastPressAtMs = 1000, nowMs = 1300, windowMs = 200))
+        assertTrue(TvPageScripts.isDoublePress(lastPressAtMs = 1000, nowMs = 1200, windowMs = 200))
+    }
+
     // ------------------------------------------------------ injected JS
 
     @Test
@@ -65,5 +93,33 @@ class TvPageScriptsTest {
     fun `fullscreen script tolerates pages without a toggle`() {
         val js = TvPageScripts.toggleFullscreenJs()
         assertTrue("must guard against a missing button", js.contains("if (b)"))
+    }
+
+    @Test
+    fun `watch style forces the fullscreen button visible`() {
+        val js = TvPageScripts.watchPageStyleJs()
+        assertTrue(js.contains(".fs-toggle"))
+        assertTrue(js.contains("opacity: 1"))
+    }
+
+    @Test
+    fun `watch style pins the button to the top-right and enlarges it`() {
+        val js = TvPageScripts.watchPageStyleJs()
+        assertTrue(js.contains("top: 12px"))
+        assertTrue(js.contains("bottom: auto"))
+        assertTrue(js.contains("width: 56px"))
+    }
+
+    @Test
+    fun `double-press script clicks toggle and resumes playback`() {
+        val js = TvPageScripts.doublePressFullscreenJs()
+        assertTrue(js.contains("fs-toggle"))
+        assertTrue(js.contains(".click()"))
+        assertTrue(js.contains("playVideo"))
+    }
+
+    @Test
+    fun `plain fullscreen script does not touch playback`() {
+        assertFalse(TvPageScripts.toggleFullscreenJs().contains("playVideo"))
     }
 }

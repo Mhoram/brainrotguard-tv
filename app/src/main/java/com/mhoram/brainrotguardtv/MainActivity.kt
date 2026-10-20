@@ -195,9 +195,10 @@ class MainActivity : Activity() {
 
             override fun onPageFinished(view: WebView, url: String) {
                 installTextInputHook(view)
-                // Watch pages: put the player at the top of the viewport so
-                // its fullscreen button is reachable without D-pad scrolling.
+                // Watch pages: put the player at the top of the viewport and
+                // pin its fullscreen button where a TV can see and reach it.
                 view.evaluateJavascript(TvPageScripts.scrollPlayerIntoViewJs(), null)
+                view.evaluateJavascript(TvPageScripts.watchPageStyleJs(), null)
                 // Inject a mic button next to each search box. Voice search is
                 // explicit (button / remote mic key) — never automatic on focus,
                 // so the search box can still be used for typing.
@@ -300,6 +301,9 @@ class MainActivity : Activity() {
     private var longPressRunnable: Runnable? = null
     private var longPressFired = false
 
+    // Uptime of the last OK tap in pointer mode, for double-press detection.
+    private var lastCenterTapAt = 0L
+
     override fun dispatchKeyEvent(event: KeyEvent?): Boolean {
         if (event == null) return super.dispatchKeyEvent(event)
         when (event.action) {
@@ -337,7 +341,12 @@ class MainActivity : Activity() {
         KeyEvent.KEYCODE_BACK -> Runnable { showSetup(prefill = serverUrl() ?: "") }
         // Holding OK toggles pointer mode (only over the web content).
         KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER ->
-            if (webView != null && !voiceActive) Runnable { toggleMouseMode() } else null
+            if (webView != null && !voiceActive) {
+                Runnable {
+                    lastCenterTapAt = 0L  // a held OK is not a double-press
+                    toggleMouseMode()
+                }
+            } else null
         // Long-press PLAY/PAUSE (or FAST_FORWARD) toggles video fullscreen.
         // Short presses fall through so the player keeps pause/seek behavior.
         KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE,
@@ -385,10 +394,20 @@ class MainActivity : Activity() {
             moveCursor(keyCode, event.repeatCount)
             return true
         }
-        // OK/ENTER in pointer mode clicks at the cursor. In normal mode fall
-        // through so the WebView clicks the focused element itself.
+        // OK/ENTER in pointer mode clicks at the cursor (double-press toggles
+        // video fullscreen). In normal mode fall through so the WebView clicks
+        // the focused element itself.
         if (mouseMode && isCenterKey(keyCode)) {
-            if (event.repeatCount == 0) dispatchTap()
+            if (event.repeatCount == 0) {
+                val now = SystemClock.uptimeMillis()
+                if (TvPageScripts.isDoublePress(lastCenterTapAt, now)) {
+                    lastCenterTapAt = 0L
+                    toggleVideoFullscreen(resumePlayback = true)
+                } else {
+                    lastCenterTapAt = now
+                    dispatchTap()
+                }
+            }
             return true
         }
         return false
@@ -465,6 +484,7 @@ class MainActivity : Activity() {
 
     private fun exitMouseMode() {
         mouseMode = false
+        lastCenterTapAt = 0L
         cursor?.visibility = View.GONE
     }
 
@@ -549,13 +569,15 @@ class MainActivity : Activity() {
     }
 
     /** Long-press ▶️ / ⏩ — zoom the video player via the page's own toggle. */
-    private fun toggleVideoFullscreen() {
+    private fun toggleVideoFullscreen(resumePlayback: Boolean = false) {
         if (webView == null) return
         if (fullscreenView != null) {
             exitHtmlFullscreen()
             return
         }
-        webView?.evaluateJavascript(TvPageScripts.toggleFullscreenJs(), null)
+        val js = if (resumePlayback) TvPageScripts.doublePressFullscreenJs()
+                 else TvPageScripts.toggleFullscreenJs()
+        webView?.evaluateJavascript(js, null)
     }
 
     private fun dispatchHover() {
