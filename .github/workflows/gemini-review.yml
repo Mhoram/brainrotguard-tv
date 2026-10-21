@@ -1,0 +1,122 @@
+name: Gemini Code Review
+
+#
+# Setup required:
+#   1. Get a free API key at https://aistudio.google.com/apikey
+#   2. Add it as a repository secret named GEMINI_API_KEY
+#      (Settings → Secrets and variables → Actions → New repository secret)
+#
+# On-demand usage (from the terminal):
+#   gh workflow run gemini-review.yml -f pr_number=<PR number>
+#   gh run watch   # stream the logs
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'PR number to review'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  gemini-review:
+    name: Review with Gemini 2.5 Pro
+    runs-on: ubuntu-latest
+    # The review is informational; a Gemini outage should never block a merge
+    continue-on-error: true
+
+    # Skip draft PRs when triggered automatically; on-demand always runs
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.draft == false
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          # Full history so we can diff against the base branch accurately
+          fetch-depth: 0
+
+      - name: Resolve PR context
+        id: ctx
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Title and body are passed via env to avoid shell injection; inlining
+          # expressions for user-controlled fields would execute PR content as shell commands.
+          EVENT_PR_TITLE: ${{ github.event.pull_request.title }}
+          EVENT_PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            # On-demand: fetch PR metadata and check out the PR branch
+            PR="${{ inputs.pr_number }}"
+            BASE=$(gh pr view "$PR" --json baseRefName -q .baseRefName)
+            TITLE=$(gh pr view "$PR" --json title -q .title)
+            BODY=$(gh pr view "$PR" --json body -q .body)
+            gh pr checkout "$PR"
+          else
+            # Automatic: use env vars; never inline expressions for user-controlled content
+            PR="${{ github.event.pull_request.number }}"
+            BASE="${{ github.base_ref }}"
+            TITLE="$EVENT_PR_TITLE"
+            BODY="$EVENT_PR_BODY"
+          fi
+
+          echo "pr_number=$PR" >> $GITHUB_OUTPUT
+          echo "base=$BASE" >> $GITHUB_OUTPUT
+
+          # Multi-line values use the heredoc syntax required by GitHub Actions
+          {
+            echo "title<<EOF"
+            echo "$TITLE"
+            echo "EOF"
+          } >> $GITHUB_OUTPUT
+          {
+            echo "body<<EOF"
+            echo "$BODY"
+            echo "EOF"
+          } >> $GITHUB_OUTPUT
+
+      - name: Generate PR diff
+        run: |
+          # Diff only source files; skip lock files, generated assets, and docs
+          # so the review focuses on code that actually runs.
+          git diff \
+            "origin/${{ steps.ctx.outputs.base }}...HEAD" \
+            -- \
+            . \
+            ':!**/*.lock' \
+            ':!package-lock.json' \
+            ':!**/dist/**' \
+            ':!**/node_modules/**' \
+            ':!**/build/**' \
+            > pr_diff.txt
+
+          echo "Diff is $(wc -l < pr_diff.txt) lines"
+
+      - name: Run Gemini review
+        id: gemini
+        continue-on-error: true
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          PR_TITLE: ${{ steps.ctx.outputs.title }}
+          PR_BODY: ${{ steps.ctx.outputs.body }}
+        run: python3 .github/scripts/gemini_review.py
+
+      - name: Post review comment
+        if: steps.gemini.outcome == 'success'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const review = fs.readFileSync('gemini_review.md', 'utf8');
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: ${{ steps.ctx.outputs.pr_number }},
+              body: review,
+            });
