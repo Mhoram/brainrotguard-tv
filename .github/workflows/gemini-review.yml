@@ -104,7 +104,17 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           PR_TITLE: ${{ steps.ctx.outputs.title }}
           PR_BODY: ${{ steps.ctx.outputs.body }}
-        run: python3 .github/scripts/gemini_review.py
+        run: |
+          # PRs created before this workflow was added don't contain the review
+          # script in their tree (workflow_dispatch checks out the PR branch);
+          # fall back to the copy on the base branch.
+          if [ ! -f .github/scripts/gemini_review.py ] && \
+             git cat-file -e "refs/remotes/origin/${{ steps.ctx.outputs.base }}:.github/scripts/gemini_review.py" 2>/dev/null; then
+            mkdir -p .github/scripts
+            git show "refs/remotes/origin/${{ steps.ctx.outputs.base }}:.github/scripts/gemini_review.py" \
+              > .github/scripts/gemini_review.py
+          fi
+          python3 .github/scripts/gemini_review.py
 
       - name: Post review comment
         if: steps.gemini.outcome == 'success'
